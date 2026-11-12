@@ -104,6 +104,7 @@ pub(crate) struct WindowsPlatformState {
 #[derive(Default)]
 struct PlatformCallbacks {
     open_urls: Cell<Option<Box<dyn FnMut(Vec<String>)>>>,
+    should_quit: gpui::QuitRequestHandler,
     quit: Cell<Option<Box<dyn FnMut() -> bool>>>,
     reopen: Cell<Option<Box<dyn FnMut()>>>,
     app_menu_action: Cell<Option<Box<dyn FnMut(&dyn Action)>>>,
@@ -597,8 +598,13 @@ impl Platform for WindowsPlatform {
     }
 
     fn quit(&self) {
+        let handler = self.inner.state.callbacks.should_quit.clone();
         self.foreground_executor()
-            .spawn(async { unsafe { PostQuitMessage(0) } })
+            .spawn(async move {
+                if handler.should_quit() {
+                    unsafe { PostQuitMessage(0) }
+                }
+            })
             .detach();
     }
 
@@ -839,6 +845,14 @@ impl Platform for WindowsPlatform {
                     .log_err();
             })
             .detach();
+    }
+
+    fn on_should_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        self.inner
+            .state
+            .callbacks
+            .should_quit
+            .set_callback(callback);
     }
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {

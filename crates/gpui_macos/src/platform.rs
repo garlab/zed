@@ -32,10 +32,10 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark,
     NSAppearanceNameVibrantLight, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationOcclusionState, NSControlStateValueOn, NSCursor, NSDocumentController,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel,
-    NSSavePanel, NSScroller, NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification,
-    NSWorkspaceWillSleepNotification,
+    NSApplicationOcclusionState, NSApplicationTerminateReply, NSControlStateValueOn, NSCursor,
+    NSDocumentController, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse,
+    NSModalResponseOK, NSOpenPanel, NSSavePanel, NSScroller, NSScrollerStyle, NSWorkspace,
+    NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
     NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSProcessInfo, NSString, NSURL,
@@ -88,6 +88,11 @@ unsafe fn build_classes() {
             decl.add_method(
                 sel!(applicationShouldHandleReopen:hasVisibleWindows:),
                 should_handle_reopen as extern "C-unwind" fn(_, Sel, *mut AnyObject, Bool) -> Bool,
+            );
+            decl.add_method(
+                sel!(applicationShouldTerminate:),
+                should_terminate
+                    as extern "C-unwind" fn(_, Sel, *mut AnyObject) -> NSApplicationTerminateReply,
             );
             decl.add_method(
                 sel!(applicationWillTerminate:),
@@ -183,6 +188,7 @@ pub(crate) struct MacPlatformState {
     on_system_sleep: Option<Box<dyn FnMut()>>,
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_power_observers_registered: bool,
+    should_quit: gpui::QuitRequestHandler,
     quit: Option<Box<dyn FnMut() -> bool>>,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
@@ -246,6 +252,7 @@ impl MacPlatform {
             general_pasteboard: Pasteboard::general(),
             find_pasteboard: Pasteboard::find(),
             reopen: None,
+            should_quit: Default::default(),
             quit: None,
             menu_command: None,
             validate_menu_command: None,
@@ -1039,6 +1046,10 @@ impl Platform for MacPlatform {
             .detach();
     }
 
+    fn on_should_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        self.0.lock().should_quit.set_callback(callback);
+    }
+
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.lock().quit = Some(callback);
     }
@@ -1420,6 +1431,20 @@ extern "C-unwind" fn should_handle_reopen(
         }
     }
     Bool::YES
+}
+
+extern "C-unwind" fn should_terminate(
+    this: &AnyObject,
+    _: Sel,
+    _: *mut AnyObject,
+) -> NSApplicationTerminateReply {
+    let platform = unsafe { get_mac_platform(this) };
+    let handler = platform.0.lock().should_quit.clone();
+    if handler.should_quit() {
+        NSApplicationTerminateReply::TerminateNow
+    } else {
+        NSApplicationTerminateReply::TerminateCancel
+    }
 }
 
 extern "C-unwind" fn will_terminate(this: &AnyObject, _: Sel, _: *mut AnyObject) {

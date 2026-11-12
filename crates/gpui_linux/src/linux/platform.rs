@@ -63,6 +63,7 @@ const FILE_PICKER_PORTAL_MISSING: &str =
 #[derive(Default)]
 pub(crate) struct PlatformHandlers {
     pub(crate) open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
+    pub(crate) should_quit: gpui::QuitRequestHandler,
     pub(crate) quit: Option<Box<dyn FnMut() -> bool>>,
     pub(crate) reopen: Option<Box<dyn FnMut()>>,
     pub(crate) app_menu_action: Option<Box<dyn FnMut(&dyn Action)>>,
@@ -681,7 +682,17 @@ impl Platform for LinuxPlatform {
     }
 
     fn quit(&self) {
-        self.with_common(|common| common.signal.stop());
+        let (handler, signal) = self
+            .with_common(|common| (common.callbacks.should_quit.clone(), common.signal.clone()));
+        // App::quit is normally called with the App borrowed. Run the veto after
+        // that update, before stopping the event loop and running quit cleanup.
+        self.foreground_executor()
+            .spawn(async move {
+                if handler.should_quit() {
+                    signal.stop();
+                }
+            })
+            .detach();
     }
 
     fn set_initial_windowing(&self, request: WindowingRequest) {
@@ -965,6 +976,10 @@ impl Platform for LinuxPlatform {
                 command.status().context("invoking xdg-open").log_err();
             })
             .detach();
+    }
+
+    fn on_should_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        self.with_common(|common| common.callbacks.should_quit.set_callback(callback));
     }
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {

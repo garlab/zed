@@ -924,6 +924,7 @@ pub struct App {
     memory_warning_observers: SingleSubscriberSet<Handler>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
     pub(crate) global_observers: SubscriberSet<TypeId, Handler>,
+    pub(crate) should_quit_observers: SingleSubscriberSet<Handler>,
     pub(crate) quit_observers: SingleSubscriberSet<QuitHandler>,
     pub(crate) restart_observers: SingleSubscriberSet<Handler>,
     pub(crate) window_closed_observers: SingleSubscriberSet<WindowClosedHandler>,
@@ -1078,6 +1079,7 @@ impl App {
                 app_lifecycle_observers: SingleSubscriberSet::new(),
                 memory_warning_observers: SingleSubscriberSet::new(),
                 global_observers: SubscriberSet::new(),
+                should_quit_observers: SingleSubscriberSet::new(),
                 quit_observers: SingleSubscriberSet::new(),
                 restart_observers: SingleSubscriberSet::new(),
                 restart_path: None,
@@ -1205,6 +1207,31 @@ impl App {
                     let power_mode = app.borrow().platform.power_mode();
                     app.borrow_mut().power_mode = power_mode;
                 }
+            }
+        }));
+
+        platform.on_should_quit(Box::new({
+            let app = Rc::downgrade(&app);
+            move || {
+                let Some(app) = app.upgrade() else {
+                    return true;
+                };
+                let Ok(mut app) = app.try_borrow_mut() else {
+                    // A native modal loop can deliver a quit request during an update.
+                    // Do not bypass the application's veto when it cannot be called.
+                    return false;
+                };
+                app.update(|cx| {
+                    let mut should_quit = true;
+                    cx.should_quit_observers.clone().retain(|callback| {
+                        if should_quit {
+                            should_quit = callback(cx);
+                        }
+                        // A veto is not an unsubscription: it also applies to retries.
+                        true
+                    });
+                    should_quit
+                })
             }
         }));
 
@@ -1346,7 +1373,8 @@ impl App {
         }))
     }
 
-    /// Gracefully quit the application via the platform's standard routine.
+    /// Request a graceful quit via the platform's standard routine.
+    /// Callbacks registered with [`Self::on_app_should_quit`] can cancel the request.
     pub fn quit(&self) {
         self.platform.quit();
     }
@@ -2940,6 +2968,27 @@ impl App {
     /// Get a map from an action name to the documentation.
     pub fn action_documentation(&self) -> &HashMap<&'static str, &'static str> {
         self.actions.documentation()
+    }
+
+    /// Register a callback that can veto an ordinary application quit request.
+    ///
+    /// Return `false` to keep the application and its windows alive. Callbacks are
+    /// retained after a veto and run again on the next request; dropping the
+    /// subscription unregisters the callback. Quit cleanup only runs after all
+    /// callbacks allow the request.
+    ///
+    /// To ask for confirmation asynchronously, start the prompt and return `false`.
+    /// Avoid opening another prompt while it is pending. On approval, update your
+    /// state so this callback returns `true`, then call [`Self::quit`] again.
+    ///
+    /// Supported for [`Self::quit`] on desktop platforms and native macOS quit
+    /// requests (including Quit from the Dock). Forced OS termination and direct
+    /// calls to [`Self::shutdown`] cannot be cancelled by this hook.
+    pub fn on_app_should_quit(
+        &self,
+        callback: impl FnMut(&mut App) -> bool + 'static,
+    ) -> Subscription {
+        self.should_quit_observers.insert(Box::new(callback))
     }
 
     /// Register a callback to be invoked when the application is about to quit.

@@ -401,6 +401,11 @@ pub trait Platform: 'static {
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>);
     fn quit(&self);
+    /// Register a veto callback for ordinary quit requests. Desktop backends must
+    /// call this before terminating, outside any borrow of the application.
+    /// Forced termination and platforms that cannot quit may bypass it.
+    fn on_should_quit(&self, _callback: Box<dyn FnMut() -> bool>) {}
+
     /// Switches a capable platform between headless and windowed modes. See
     /// [`App::request_windowing`].
     /// Sets the windowing mode the platform starts in. Called before `run`. See
@@ -702,6 +707,28 @@ pub trait PlatformDisplay: Debug {
         let offset = clipped_window_size / 2.0;
         let origin = point(center.x - offset.width, center.y - offset.height);
         Bounds::new(origin, clipped_window_size)
+    }
+}
+
+/// A reentrancy-safe quit veto callback shared by desktop platform backends.
+///
+/// Clone this handle before calling it so no platform state lock is held while
+/// application code runs. Nested requests are rejected while the callback runs.
+#[derive(Clone, Default)]
+pub struct QuitRequestHandler(Rc<std::cell::RefCell<Option<Box<dyn FnMut() -> bool>>>>);
+
+impl QuitRequestHandler {
+    /// Install the application's callback during platform initialization.
+    pub fn set_callback(&self, callback: Box<dyn FnMut() -> bool>) {
+        *self.0.borrow_mut() = Some(callback);
+    }
+
+    /// Whether this request may proceed. An absent callback allows quitting.
+    pub fn should_quit(&self) -> bool {
+        let Ok(mut callback) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        callback.as_mut().is_none_or(|callback| callback())
     }
 }
 
@@ -4055,5 +4082,25 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_all_invalid() {
         assert!(WindowButtonLayout::parse("asdfghjkl").is_err());
+    }
+}
+
+#[cfg(test)]
+mod quit_request_tests {
+    use super::*;
+
+    #[test]
+    fn nested_quit_request_is_rejected_without_losing_the_handler() {
+        let handler = QuitRequestHandler::default();
+        assert!(handler.should_quit());
+        let weak = Rc::downgrade(&handler.0);
+        handler.set_callback(Box::new(move || {
+            assert!(!QuitRequestHandler(weak.upgrade().unwrap()).should_quit());
+            true
+        }));
+        assert!(handler.should_quit());
+        assert!(handler.should_quit());
+        handler.set_callback(Box::new(|| false));
+        assert!(!handler.should_quit());
     }
 }

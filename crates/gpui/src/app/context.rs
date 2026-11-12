@@ -190,6 +190,23 @@ impl<'a, T: 'static> Context<'a, T> {
         })
     }
 
+    /// Register an entity callback that can veto a quit request.
+    /// See [`App::on_app_should_quit`] for asynchronous confirmation and platform support.
+    pub fn on_app_should_quit(
+        &self,
+        mut callback: impl FnMut(&mut T, &mut Context<T>) -> bool + 'static,
+    ) -> Subscription
+    where
+        T: 'static,
+    {
+        let handle = self.weak_entity();
+        self.app.on_app_should_quit(move |cx| {
+            handle
+                .update(cx, |entity, cx| callback(entity, cx))
+                .unwrap_or(true)
+        })
+    }
+
     /// Arrange for the given function to be invoked whenever the application is quit.
     /// The future returned from this callback will be polled for up to [crate::SHUTDOWN_TIMEOUT] until the app fully quits.
     pub fn on_app_quit<Fut>(

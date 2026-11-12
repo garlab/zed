@@ -1557,3 +1557,94 @@ mod tests {
         assert_eq!(response, None);
     }
 }
+
+#[cfg(test)]
+mod quit_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[gpui::test]
+    fn test_quit_veto_preserves_windows_and_cleanup_until_retry(cx: &mut TestAppContext) {
+        cx.add_empty_window();
+        let approved = Rc::new(Cell::new(false));
+        let requests = Rc::new(Cell::new(0));
+        let cleanup = Rc::new(Cell::new(0));
+        let _subscription = cx.update({
+            let approved = approved.clone();
+            let requests = requests.clone();
+            let cleanup = cleanup.clone();
+            move |cx| {
+                cx.on_app_quit(move |_| {
+                    cleanup.set(cleanup.get() + 1);
+                    async {}
+                })
+                .detach();
+                cx.on_app_should_quit(move |_| {
+                    requests.set(requests.get() + 1);
+                    approved.get()
+                })
+            }
+        });
+
+        for expected_requests in 1..=2 {
+            cx.update(|cx| cx.quit());
+            cx.run_until_parked();
+            assert_eq!(requests.get(), expected_requests);
+            assert_eq!(cleanup.get(), 0);
+            assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        }
+        approved.set(true);
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        assert_eq!(requests.get(), 3);
+        assert_eq!(cleanup.get(), 1);
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+    }
+
+    #[gpui::test]
+    fn test_quit_requires_all_handlers_and_dropping_a_veto_allows_retry(cx: &mut TestAppContext) {
+        cx.add_empty_window();
+        let _allow = cx.update(|cx| cx.on_app_should_quit(|_| true));
+        let veto = cx.update(|cx| cx.on_app_should_quit(|_| false));
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        drop(veto);
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+    }
+
+    #[gpui::test]
+    fn test_native_quit_during_app_update_does_not_bypass_veto(cx: &mut TestAppContext) {
+        let handler = cx.test_platform.should_quit.clone();
+        assert!(handler.should_quit());
+        cx.update(|_| assert!(!handler.should_quit()));
+        assert!(handler.should_quit());
+    }
+
+    #[gpui::test]
+    fn test_released_entity_does_not_veto_quit(cx: &mut TestAppContext) {
+        cx.add_empty_window();
+        let entity = cx.new(|cx| {
+            cx.on_app_should_quit(|_, _| false).detach();
+        });
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        drop(entity);
+        cx.update(|_| {});
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+    }
+
+    #[gpui::test]
+    fn test_direct_shutdown_is_not_vetoed(cx: &mut TestAppContext) {
+        cx.add_empty_window();
+        let _subscription =
+            cx.update(|cx| cx.on_app_should_quit(|_| panic!("forced shutdown must not ask")));
+        cx.update(|cx| cx.shutdown());
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+    }
+}

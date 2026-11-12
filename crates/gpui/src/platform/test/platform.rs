@@ -59,6 +59,8 @@ pub(crate) struct TestPlatform {
     menus: RefCell<Vec<OwnedMenu>>,
     pub(crate) app_lifecycle_callback: RefCell<Option<Box<dyn FnMut(AppLifecyclePhase)>>>,
     pub(crate) memory_warning_callback: RefCell<Option<Box<dyn FnMut()>>>,
+    pub(crate) should_quit: crate::QuitRequestHandler,
+    quit_callback: RefCell<Option<Box<dyn FnMut() -> bool>>>,
 }
 
 #[derive(Clone)]
@@ -268,6 +270,8 @@ impl TestPlatform {
             menus: Default::default(),
             app_lifecycle_callback: Default::default(),
             memory_warning_callback: Default::default(),
+            should_quit: Default::default(),
+            quit_callback: Default::default(),
         })
     }
 
@@ -533,7 +537,19 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn quit(&self) {}
+    fn quit(&self) {
+        let platform = self.weak.upgrade().unwrap();
+        self.foreground_executor
+            .spawn(async move {
+                if platform.should_quit.should_quit() {
+                    let callback = platform.quit_callback.borrow_mut().take();
+                    if let Some(mut callback) = callback {
+                        callback();
+                    }
+                }
+            })
+            .detach();
+    }
 
     fn restart(&self, path: Option<PathBuf>, arguments: Vec<std::ffi::OsString>) {
         if let Some(tx) = self.expect_restart.take() {
@@ -694,7 +710,13 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn on_quit(&self, _callback: Box<dyn FnMut() -> bool>) {}
+    fn on_should_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        self.should_quit.set_callback(callback);
+    }
+
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        *self.quit_callback.borrow_mut() = Some(callback);
+    }
 
     fn on_reopen(&self, _callback: Box<dyn FnMut()>) {
         unimplemented!()
